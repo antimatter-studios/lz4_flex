@@ -18,12 +18,14 @@ use crate::sink::SliceSink;
 use alloc::vec;
 use alloc::vec::Vec;
 
+mod dest_size;
 mod hash_chain;
 mod optimal;
 #[cfg(test)]
 mod tests;
 mod two_hashtables;
 
+pub use dest_size::compress_hc_dest_size;
 use hash_chain::{compress_hash_chain_internal, HashTableHCU32};
 use optimal::compress_opt_internal;
 use two_hashtables::{compress_two_hash_tables_internal, TwoHashTables};
