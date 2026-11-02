@@ -111,7 +111,9 @@ fn encode_optimal_parse_path(
         }
 
         encode_sequence(
-            &input[*literal_start..*cur],
+            input,
+            *literal_start,
+            *cur - *literal_start,
             output,
             match_offset,
             match_length - MINMATCH,
@@ -368,7 +370,9 @@ pub(super) fn compress_opt_internal(
 
         if first_match_length >= sufficient_match_len {
             encode_sequence(
-                &input[literal_start..cur],
+                input,
+                literal_start,
+                cur - literal_start,
                 output,
                 first_match_offset,
                 first_match_length - MINMATCH,

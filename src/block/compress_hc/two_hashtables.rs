@@ -349,7 +349,9 @@ impl<'a, const USE_DICT: bool> TwoHashTablesMatchFinder<'a, USE_DICT> {
             self.stream_offset,
         );
         encode_sequence(
-            &self.input[literal_start..match_start],
+            self.input,
+            literal_start,
+            match_start - literal_start,
             output,
             match_candidate.offset,
             match_end - match_start - MINMATCH,

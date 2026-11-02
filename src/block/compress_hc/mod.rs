@@ -12,7 +12,6 @@ use crate::block::CompressError;
 #[cfg(not(feature = "safe-encode"))]
 use crate::sink::PtrSink;
 use crate::sink::Sink;
-#[cfg(feature = "safe-encode")]
 use crate::sink::SliceSink;
 #[allow(unused_imports)]
 use alloc::vec;
@@ -231,6 +230,9 @@ impl CompressTableHC {
 
 /// Compress input data using the LZ4 high compression algorithm.
 ///
+/// `Sink` is private to this crate, so callers outside it use
+/// [`compress_hc_into`] or [`compress_hc_to_vec`].
+///
 /// Allocates a fresh internal table on every call. For repeated compression
 /// (e.g. compressing many blocks in a loop), prefer [`compress_hc_with_table`]
 /// with a reusable [`CompressTableHC`] to avoid repeated allocation.
@@ -411,10 +413,19 @@ pub(crate) fn compress_hc_linked(
 /// [`CompressError::OutputTooSmall`] when the result does not fit.
 pub fn compress_hc_into(
     input: &[u8],
-    _output: &mut [u8],
-    _level: u8,
+    output: &mut [u8],
+    level: u8,
 ) -> Result<usize, CompressError> {
-    Ok(input.len())
+    if output.len() < crate::block::compress::get_maximum_output_size(input.len()) {
+        // The compressors write without checking, so a small output is checked afterwards.
+        let block = compress_hc_to_vec(input, level);
+        let room = output
+            .get_mut(..block.len())
+            .ok_or(CompressError::OutputTooSmall)?;
+        room.copy_from_slice(&block);
+        return Ok(block.len());
+    }
+    compress_hc(input, &mut SliceSink::new(output, 0), level)
 }
 
 /// Compress input data using the LZ4 high compression algorithm, returning a Vec.

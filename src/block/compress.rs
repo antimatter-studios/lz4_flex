@@ -475,7 +475,9 @@ pub(crate) fn compress_internal<T: HashTable, const USE_DICT: bool, S: Sink>(
         dict.put_at(hash, cur - 2 + input_stream_offset);
 
         encode_sequence(
-            &input[literal_start..literal_start + lit_len],
+            input,
+            literal_start,
+            lit_len,
             output,
             offset,
             duplicate_length,
@@ -487,26 +489,29 @@ pub(crate) fn compress_internal<T: HashTable, const USE_DICT: bool, S: Sink>(
 
 #[inline(always)]
 pub(crate) fn encode_sequence<S: Sink>(
-    literal: &[u8],
+    input: &[u8],
+    literal_start: usize,
+    literal_len: usize,
     output: &mut S,
     offset: u16,
     match_len: usize,
 ) {
-    let token = token_from_literal_and_match_length(literal.len(), match_len);
+    let token = token_from_literal_and_match_length(literal_len, match_len);
     // Push the token to the output stream.
     push_byte(output, token);
     // If we were unable to fit the literals length into the token, write the extensional
     // part.
-    if literal.len() >= 0xF {
-        write_integer(output, literal.len() - 0xF);
+    if literal_len >= 0xF {
+        write_integer(output, literal_len - 0xF);
     }
 
     // Now, write the actual literals.
     //
     // The unsafe version copies blocks of 8bytes, and therefore may copy up to 7bytes more than
     // needed. This is safe, because the last 12 bytes (MF_LIMIT) are handled in
-    // handle_last_literals.
-    copy_literals_wild(output, literal, 0, literal.len());
+    // handle_last_literals. It is given the whole input, not the literals' subslice, because
+    // those bytes are outside the subslice.
+    copy_literals_wild(output, input, literal_start, literal_len);
     // write the offset in little endian.
     push_u16(output, offset);
 

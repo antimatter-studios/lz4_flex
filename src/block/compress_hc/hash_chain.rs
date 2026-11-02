@@ -61,7 +61,8 @@ impl Match {
     /// Used to resolve overlaps between consecutive matches.
     fn trim_front(&mut self, bytes_to_skip: usize) {
         self.start_position += bytes_to_skip as u32;
-        self.candidate += bytes_to_skip as u32;
+        // A candidate in an external dictionary is a position that wrapped below zero.
+        self.candidate = self.candidate.wrapping_add(bytes_to_skip as u32);
         self.match_length = self.match_length.saturating_sub(bytes_to_skip as u32);
     }
 
@@ -72,7 +73,9 @@ impl Match {
 
     fn encode_to<S: Sink>(&self, input: &[u8], literal_start: usize, output: &mut S) {
         encode_sequence(
-            &input[literal_start..self.start_position as usize],
+            input,
+            literal_start,
+            self.start_position as usize - literal_start,
             output,
             self.offset(),
             self.match_length as usize - MINMATCH,
