@@ -1188,3 +1188,24 @@ pub(super) fn compress_hash_chain_internal(
     handle_last_literals(output, &input[literal_start..input_end]);
     Ok(output.pos() - output_start_pos)
 }
+
+#[cfg(test)]
+mod review_tests {
+    use super::Match;
+
+    /// A candidate in an external dictionary is held as a position that wrapped
+    /// below zero, so trimming a match can carry it back past zero. The offset
+    /// is taken with a wrapping subtraction and stays right.
+    #[test]
+    fn trimming_a_match_whose_candidate_wrapped_keeps_its_offset() {
+        let mut m = Match {
+            start_position: 10,
+            match_length: 40,
+            candidate: 10u32.wrapping_sub(13),
+        };
+        assert_eq!(m.offset(), 13);
+        m.trim_front(5);
+        assert_eq!(m.offset(), 13);
+        assert_eq!(m.start_position, 15);
+    }
+}

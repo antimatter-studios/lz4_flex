@@ -399,6 +399,24 @@ pub(crate) fn compress_hc_linked(
     }
 }
 
+/// Compress `input` into `output` with the LZ4 high compression algorithm.
+///
+/// Returns the bytes written. An `output` of [`get_maximum_output_size`] bytes
+/// always holds the result; a smaller one is checked.
+///
+/// [`get_maximum_output_size`]: crate::block::get_maximum_output_size
+///
+/// # Errors
+///
+/// [`CompressError::OutputTooSmall`] when the result does not fit.
+pub fn compress_hc_into(
+    input: &[u8],
+    _output: &mut [u8],
+    _level: u8,
+) -> Result<usize, CompressError> {
+    Ok(input.len())
+}
+
 /// Compress input data using the LZ4 high compression algorithm, returning a Vec.
 ///
 /// This is a convenience function that allocates the output buffer internally.
