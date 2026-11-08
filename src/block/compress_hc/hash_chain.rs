@@ -611,6 +611,7 @@ impl HashTableHCU32 {
             if cur_absolute > new_ref_abs && cur_absolute - new_ref_abs <= self.chain_mask() {
                 return PatternChainAction::RetryCandidate(new_ref_abs);
             }
+            PatternChainAction::StopSearch
         } else {
             let new_candidate_relative = match_candidate_relative - back_length;
             let new_ref_abs = new_candidate_relative + stream_offset;
@@ -626,9 +627,8 @@ impl HashTableHCU32 {
                 }
                 return PatternChainAction::RetryCandidate(new_ref_abs - dist);
             }
+            PatternChainAction::StopSearch
         }
-
-        PatternChainAction::NoAction
     }
 }
 

@@ -11,8 +11,6 @@ const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
 /// The last match starts at least this far before the end of the block.
 const MATCH_START_MARGIN: usize = 12;
-/// The smallest window tried, however small the output.
-const MIN_WINDOW: usize = 1 << 16;
 
 /// Extra bytes a literal or match count needs beyond its token nibble.
 fn extra_bytes(count: usize) -> usize {
@@ -93,9 +91,11 @@ fn cut_block(input: &[u8], block: &[u8], output: &mut [u8]) -> (usize, usize) {
     (consumed + literals, out + literals)
 }
 
-/// The first window to compress for an output of `output_length` bytes.
+/// The first window to compress for an output of `output_length` bytes: a
+/// little more than it holds, so incompressible input overflows it and only
+/// what is cut off is wasted. Input that compresses fits, and the window grows.
 fn first_window(input_length: usize, output_length: usize) -> usize {
-    input_length.min(MIN_WINDOW.max(output_length.saturating_mul(8)))
+    input_length.min(output_length.saturating_add(output_length / 32 + 32))
 }
 
 /// Compress as much of `input` as fits in `output`, as one standard block that
