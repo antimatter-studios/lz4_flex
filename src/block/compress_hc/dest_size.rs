@@ -1,11 +1,18 @@
 //! Fixed-output compression: as much of the input as fits in the output.
 //!
 //! Filesystems that compress into fixed-size physical clusters, such as EROFS,
-//! need this mode. The parsers are left as they are. A window of the input is
-//! compressed, and the block is then cut at the last sequence that fits, so
-//! the output is what `compress_hc_to_vec` chose, up to that point.
+//! need this mode. The block is cut at the last sequence that fits, so the
+//! output is what the parser chose, up to that point. The optimal parser stops
+//! once the output is full. The others compress a window of the input.
 
-use super::compress_hc_to_vec;
+use super::hash_chain::HashTableHCU32;
+use super::optimal::parse_optimal_sequences;
+use super::{
+    compress_hc_to_vec, hc_level_params, HcCompressionStrategy, HcLevelParams, LZ4_OPT_NUM,
+};
+use crate::block::handle_last_literals;
+use crate::sink::{Sink, SliceSink};
+use alloc::vec;
 
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
@@ -98,6 +105,41 @@ fn first_window(input_length: usize, output_length: usize) -> usize {
     input_length.min(output_length.saturating_add(output_length / 32 + 32))
 }
 
+/// The bytes the optimal parser can write when asked to stop at
+/// `output_length`. It checks between steps, so one step can run past: the
+/// literals before it, the at most `LZ4_OPT_NUM` positions it parses, and a
+/// last match as long as the input.
+fn parse_capacity(input_length: usize, output_length: usize) -> usize {
+    output_length + output_length / 255 + LZ4_OPT_NUM * 2 + input_length / 255 + 64
+}
+
+/// [`compress_hc_dest_size`] for the optimal parser, which stops searching
+/// when the output is full.
+fn optimal_dest_size(input: &[u8], output: &mut [u8], params: HcLevelParams) -> (usize, usize) {
+    let mut hash_table = HashTableHCU32::new(params.max_attempts, input.len());
+    let mut block = vec![0u8; parse_capacity(input.len(), output.len())];
+    let mut sink = SliceSink::new(&mut block, 0);
+    let literal_start = parse_optimal_sequences(
+        input,
+        0,
+        &mut sink,
+        params,
+        &mut hash_table,
+        &[],
+        0,
+        output.len(),
+    );
+    if let Some(literal_start) = literal_start {
+        handle_last_literals(&mut sink, &input[literal_start..]);
+    }
+    let written = sink.pos();
+    if literal_start.is_some() && written <= output.len() {
+        output[..written].copy_from_slice(&block[..written]);
+        return (input.len(), written);
+    }
+    cut_block(input, &block[..written], output)
+}
+
 /// Compress as much of `input` as fits in `output`, as one standard block that
 /// decodes on its own, at compression `level` as for [`compress_hc_to_vec`].
 ///
@@ -121,6 +163,10 @@ pub fn compress_hc_dest_size(input: &[u8], output: &mut [u8], level: u8) -> (usi
     if output.is_empty() {
         return (0, 0);
     }
+    let params = hc_level_params(level.min(12));
+    if params.strategy == HcCompressionStrategy::Optimal {
+        return optimal_dest_size(input, output, params);
+    }
     let mut window = first_window(input.len(), output.len());
     loop {
         let block = compress_hc_to_vec(&input[..window], level);
@@ -137,7 +183,75 @@ pub fn compress_hc_dest_size(input: &[u8], output: &mut [u8], level: u8) -> (usi
 
 #[cfg(test)]
 mod tests {
-    use super::first_window;
+    use super::*;
+    use crate::block::decompress;
+    use alloc::vec::Vec;
+
+    fn noise(length: usize) -> Vec<u8> {
+        let mut state = 88172645463325252u64;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// Input that makes one parser step write as much as it can: noise up to
+    /// the limit, then a long match or many short ones.
+    fn overshooting_inputs() -> Vec<Vec<u8>> {
+        let lead = noise(4096);
+        let mut long_match = lead.clone();
+        long_match.resize(lead.len() + (4 << 20), 0);
+        let mut short_matches = lead.clone();
+        let tail = noise(1 << 16);
+        for chunk in tail.chunks(5) {
+            short_matches.extend_from_slice(&lead[..4]);
+            short_matches.push(chunk[0]);
+        }
+        let mut literals_before_a_match = noise(1 << 16);
+        let start = literals_before_a_match[..8192].to_vec();
+        literals_before_a_match.extend_from_slice(&start);
+        Vec::from([long_match, short_matches, literals_before_a_match])
+    }
+
+    fn parse(input: &[u8], limit: usize) -> (Option<usize>, usize, usize) {
+        let params = hc_level_params(12);
+        let mut hash_table = HashTableHCU32::new(params.max_attempts, input.len());
+        let mut block = vec![0u8; parse_capacity(input.len(), limit)];
+        let mut sink = SliceSink::new(&mut block, 0);
+        let literal_start =
+            parse_optimal_sequences(input, 0, &mut sink, params, &mut hash_table, &[], 0, limit);
+        (literal_start, sink.pos(), hash_table.positions_inserted())
+    }
+
+    /// The point of stopping: input past a full output is never searched.
+    #[test]
+    fn the_optimal_parser_does_not_search_past_a_full_output() {
+        const OUTPUT: usize = 4096;
+        let (literal_start, _, inserted) = parse(&noise(1 << 20), OUTPUT);
+        assert_eq!(literal_start, None);
+        assert!(inserted <= OUTPUT + 16, "searched {inserted} positions");
+    }
+
+    /// The parser checks only between steps, and the scratch block has to
+    /// hold what the step that fills it writes past the limit.
+    #[test]
+    fn the_step_that_fills_the_output_stays_within_the_scratch_block() {
+        for input in overshooting_inputs() {
+            for limit in (1..64).chain((3900..4300).step_by(7)).chain([8192, 32768]) {
+                let (_, written, _) = parse(&input, limit);
+                assert!(written <= parse_capacity(input.len(), limit), "{limit}");
+
+                let mut output = vec![0u8; limit];
+                let (taken, written) = compress_hc_dest_size(&input, &mut output, 12);
+                let back = decompress(&output[..written], taken).unwrap();
+                assert!(back == input[..taken], "{limit}");
+            }
+        }
+    }
 
     /// Whatever is compressed past the point where the output is full is
     /// thrown away, so the first window is only a little more than the

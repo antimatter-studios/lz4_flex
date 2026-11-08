@@ -450,6 +450,12 @@ impl HashTableHCU32 {
         self.max_attempts = max_attempts;
     }
 
+    /// The positions inserted so far, which is as far as the search has got.
+    #[cfg(test)]
+    pub(super) fn positions_inserted(&self) -> usize {
+        self.next_to_update
+    }
+
     /// Prepare the table for a new linked block without clearing existing entries.
     /// Ensures the chain table is `MAX_DISTANCE_HC` so cross-block chain links work,
     /// and advances `next_to_update` past the positions now in `ext_dict`.
