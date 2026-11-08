@@ -93,6 +93,11 @@ fn cut_block(input: &[u8], block: &[u8], output: &mut [u8]) -> (usize, usize) {
     (consumed + literals, out + literals)
 }
 
+/// The first window to compress for an output of `output_length` bytes.
+fn first_window(input_length: usize, output_length: usize) -> usize {
+    input_length.min(MIN_WINDOW.max(output_length.saturating_mul(8)))
+}
+
 /// Compress as much of `input` as fits in `output`, as one standard block that
 /// decodes on its own, at compression `level` as for [`compress_hc_to_vec`].
 ///
@@ -116,9 +121,7 @@ pub fn compress_hc_dest_size(input: &[u8], output: &mut [u8], level: u8) -> (usi
     if output.is_empty() {
         return (0, 0);
     }
-    let mut window = input
-        .len()
-        .min(MIN_WINDOW.max(output.len().saturating_mul(8)));
+    let mut window = first_window(input.len(), output.len());
     loop {
         let block = compress_hc_to_vec(&input[..window], level);
         if block.len() > output.len() || window == input.len() {
@@ -129,5 +132,26 @@ pub fn compress_hc_dest_size(input: &[u8], output: &mut [u8], level: u8) -> (usi
             return cut_block(&input[..window], &block, output);
         }
         window = input.len().min(window.saturating_mul(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_window;
+
+    /// Whatever is compressed past the point where the output is full is
+    /// thrown away, so the first window is only a little more than the
+    /// output holds; compressible input earns a bigger one by fitting.
+    #[test]
+    fn the_first_window_is_little_more_than_the_output_holds() {
+        const OUTPUT: usize = 32 << 10;
+        let window = first_window(1 << 20, OUTPUT);
+        assert!(window > OUTPUT, "{window}");
+        assert!(window <= OUTPUT + OUTPUT / 16, "{window}");
+    }
+
+    #[test]
+    fn the_first_window_is_never_more_than_the_input() {
+        assert_eq!(first_window(100, 32 << 10), 100);
     }
 }

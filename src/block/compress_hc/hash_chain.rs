@@ -364,6 +364,16 @@ fn count_buffer_match(
     MINMATCH + count_common_bytes(input, candidate + MINMATCH, cur + MINMATCH, match_limit)
 }
 
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+std::thread_local! {
+    /// Bytes `reverse_count_pattern` walked back over on this thread, so a
+    /// test can bound the search without timing it.
+    pub(super) static BYTES_SCANNED_BACK: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// Result of pattern/repeat chain optimization inside [`find_longer_hash_chain_match`]
 /// (mirrors LZ4HC repeat detection).
 enum PatternChainAction {
@@ -589,6 +599,8 @@ impl HashTableHCU32 {
         let forward_pattern_len =
             count_pattern(input, match_candidate_relative + 4, match_limit, pattern) + 4;
         let back_length = reverse_count_pattern(input, match_candidate_relative, 0, pattern);
+        #[cfg(test)]
+        BYTES_SCANNED_BACK.with(|scanned| scanned.set(scanned.get() + back_length));
         let segment_length = back_length + forward_pattern_len;
 
         if segment_length >= *source_pattern_length && forward_pattern_len <= *source_pattern_length
