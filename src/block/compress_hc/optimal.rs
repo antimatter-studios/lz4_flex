@@ -322,10 +322,39 @@ pub(super) fn compress_opt_internal(
     stream_offset: usize,
 ) -> Result<usize, CompressError> {
     let output_start_pos = output.pos();
+    if let Some(literal_start) = parse_optimal_sequences(
+        input,
+        input_pos,
+        output,
+        level_params,
+        hash_table,
+        ext_dict,
+        stream_offset,
+        usize::MAX,
+    ) {
+        handle_last_literals(output, &input[literal_start..]);
+    }
+    Ok(output.pos() - output_start_pos)
+}
 
+/// Encode the sequences of `input`, without the literals that end a block.
+///
+/// Returns where those literals start, or `None` when it stopped early: no
+/// further sequence fits once the output and the pending literals reach
+/// `output_limit`, so nothing is searched past that point.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn parse_optimal_sequences(
+    input: &[u8],
+    input_pos: usize,
+    output: &mut impl Sink,
+    level_params: HcLevelParams,
+    hash_table: &mut HashTableHCU32,
+    ext_dict: &[u8],
+    stream_offset: usize,
+    output_limit: usize,
+) -> Option<usize> {
     if input.len() - input_pos < LZ4_MIN_LENGTH {
-        handle_last_literals(output, &input[input_pos..]);
-        return Ok(output.pos() - output_start_pos);
+        return Some(input_pos);
     }
 
     let input_end = input.len();
@@ -351,6 +380,9 @@ pub(super) fn compress_opt_internal(
     let sufficient_match_len = sufficient_match_len.min(LZ4_OPT_NUM - 1);
 
     while cur <= end_pos_check {
+        if output.pos() + (cur - literal_start) >= output_limit {
+            return None;
+        }
         let literal_length = (cur - literal_start) as i32;
 
         let (first_match_length, first_match_offset) = find_longer_hash_chain_match(
@@ -476,6 +508,5 @@ pub(super) fn compress_opt_internal(
         // No optimal-state reset needed (matches C behavior).
     }
 
-    handle_last_literals(output, &input[literal_start..input_end]);
-    Ok(output.pos() - output_start_pos)
+    Some(literal_start)
 }

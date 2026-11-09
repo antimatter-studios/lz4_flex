@@ -1,0 +1,79 @@
+name: Fixed-output HC benchmark
+
+on:
+  pull_request:
+    paths:
+      - "src/block/compress_hc/**"
+      - "tests/hc_dest_size.rs"
+      - "benches/fixed_output_dest_size.rs"
+      - "Cargo.toml"
+      - ".github/workflows/fixed-output-benchmark.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Raw-file fixed-output benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test fixed-output behavior against liblz4
+        run: cargo test --test hc_dest_size
+      - name: Benchmark raw files against liblz4
+        run: |
+          set -o pipefail
+          cargo bench --bench fixed_output_dest_size 2>&1 | tee fixed-output-benchmark.txt
+      - name: Publish results in the workflow summary
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          records = {}
+          for line in Path("fixed-output-benchmark.txt").read_text().splitlines():
+              if not line.startswith("result,"):
+                  continue
+              fields = dict(field.split("=", 1) for field in line.split(",") if "=" in field)
+              records[(fields["corpus"], int(fields["output_capacity"]), fields["codec"])] = fields
+
+          lines = [
+              "### Fixed-output HC benchmark",
+              "",
+              f"- Commit: `{os.environ['COMMIT_SHA']}`",
+              f"- Runner: `{os.environ['RUNNER_OS']}`",
+              "- Method: level 12; three 200 ms samples per codec, with execution order rotated.",
+              "- Input: deterministic 1 MiB raw-file corpora; output capacities are 4, 8, 16, and 32 KiB.",
+              "",
+              "| Raw corpus | Output | Rust stateless | Rust reused | liblz4 C | Reused / C | Ratio delta (pp) | Retained Rust workspace |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          keys = sorted({(corpus, capacity) for corpus, capacity, _ in records})
+          for corpus, capacity in keys:
+              stateless = records[(corpus, capacity, "lz4_flex_stateless")]
+              reused = records[(corpus, capacity, "lz4_flex_reused")]
+              c = records[(corpus, capacity, "liblz4_hc")]
+              speedup = float(reused["mib_per_sec"]) / float(c["mib_per_sec"])
+              ratio_delta = (float(reused["ratio"]) - float(c["ratio"])) * 100
+              workspace = reused["retained_workspace_bytes"]
+              lines.append(
+                  f"| {corpus} | {capacity // 1024} KiB | {float(stateless['mib_per_sec']):.1f} MiB/s "
+                  f"| {float(reused['mib_per_sec']):.1f} MiB/s | {float(c['mib_per_sec']):.1f} MiB/s "
+                  f"| {speedup:.3f}x | {ratio_delta:+.3f} | {workspace} B |"
+              )
+
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fixed-output-benchmark
+          path: fixed-output-benchmark.txt
+          if-no-files-found: error
+          retention-days: 90

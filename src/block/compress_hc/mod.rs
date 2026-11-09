@@ -24,7 +24,9 @@ mod optimal;
 mod tests;
 mod two_hashtables;
 
-pub use dest_size::compress_hc_dest_size;
+pub use dest_size::{
+    compress_hc_dest_size, compress_hc_dest_size_with_table, CompressHcDestSizeTable,
+};
 use hash_chain::{compress_hash_chain_internal, HashTableHCU32};
 use optimal::compress_opt_internal;
 use two_hashtables::{compress_two_hash_tables_internal, TwoHashTables};
@@ -109,8 +111,8 @@ pub(crate) const fn hc_level_params(level: u8) -> HcLevelParams {
         // 12, or defensive fallback if `level` was not clamped
         _ => HcLevelParams {
             strategy: HcCompressionStrategy::Optimal,
-            max_attempts: 16384,
-            sufficient_match_len: LZ4_OPT_NUM,
+            max_attempts: 4096,
+            sufficient_match_len: 512,
             full_optimal_update: true,
         },
     }

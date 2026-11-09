@@ -165,8 +165,8 @@ fn consecutive_pieces_cover_the_input() {
     assert!(back == data);
 }
 
-/// The output on a 32 KiB budget stays within 2% of liblz4's `destSize`, on
-/// what a system partition holds.
+/// The output on a 32 KiB budget stays within 2% of liblz4's `destSize` on a
+/// large mixed input corpus.
 #[test]
 fn the_ratio_is_within_two_percent_of_liblz4() {
     use lzzzz::lz4_hc;
