@@ -708,6 +708,39 @@ pub(super) fn find_longer_hash_chain_match(
     ext_dict: &[u8],
     stream_offset: usize,
 ) -> (u32, u16) {
+    if ext_dict.is_empty() {
+        find_longer_hash_chain_match_impl::<false>(
+            hash_table,
+            input,
+            cur,
+            match_limit,
+            min_match_length,
+            ext_dict,
+            stream_offset,
+        )
+    } else {
+        find_longer_hash_chain_match_impl::<true>(
+            hash_table,
+            input,
+            cur,
+            match_limit,
+            min_match_length,
+            ext_dict,
+            stream_offset,
+        )
+    }
+}
+
+#[inline]
+fn find_longer_hash_chain_match_impl<const HAS_EXT_DICT: bool>(
+    hash_table: &mut HashTableHCU32,
+    input: &[u8],
+    cur: usize,
+    match_limit: usize,
+    min_match_length: usize,
+    ext_dict: &[u8],
+    stream_offset: usize,
+) -> (u32, u16) {
     hash_table.insert(cur as u32, input, stream_offset);
 
     let cur_absolute = cur + stream_offset;
@@ -726,7 +759,14 @@ pub(super) fn find_longer_hash_chain_match(
             break;
         }
 
-        match candidate_source(candidate, stream_offset, ext_dict.len()) {
+        let source = if HAS_EXT_DICT {
+            candidate_source(candidate, stream_offset, ext_dict.len())
+        } else if candidate >= stream_offset {
+            CandidateSource::Input(candidate - stream_offset)
+        } else {
+            CandidateSource::Unavailable
+        };
+        match source {
             CandidateSource::Input(candidate_relative) => {
                 let match_length = count_buffer_match(
                     input,

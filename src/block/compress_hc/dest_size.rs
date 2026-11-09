@@ -6,7 +6,7 @@
 //! compress a window of the input.
 
 use super::hash_chain::HashTableHCU32;
-use super::optimal::parse_optimal_sequences;
+use super::optimal::{parse_optimal_sequences_with_scratch, OptimalState};
 use super::{
     compress_hc_to_vec, hc_level_params, HcCompressionStrategy, HcLevelParams, LZ4_OPT_NUM,
 };
@@ -120,16 +120,21 @@ fn dest_size_params(level: u8, output_length: usize) -> HcLevelParams {
     if level >= 12 && params.strategy == HcCompressionStrategy::Optimal {
         const MAX_OUTPUT: usize = 32 * 1024;
         const MAX_ATTEMPTS: usize = 192;
-        const MIN_ATTEMPTS: usize = 96;
         // Fixed-output parsing gets less value from evaluating every
         // alternate parse, so use the cheaper optimal-update policy here.
         params.full_optimal_update = false;
+        const MIN_ATTEMPTS: usize = 48;
         params.max_attempts = params
             .max_attempts
             .min(MAX_ATTEMPTS)
             .saturating_mul(output_length.min(MAX_OUTPUT))
             .div_ceil(MAX_OUTPUT)
             .max(MIN_ATTEMPTS);
+        if output_length <= 8 * 1024 {
+            // Small fixed outputs gain less from searching alternate parses
+            // once a match is long enough to dominate the literal prefix.
+            params.sufficient_match_len = params.sufficient_match_len.min(128);
+        }
     }
     params
 }
@@ -142,10 +147,11 @@ fn optimal_dest_size(
     params: HcLevelParams,
     hash_table: &mut HashTableHCU32,
     block: &mut Vec<u8>,
+    optimal_states: &mut Vec<OptimalState>,
 ) -> (usize, usize) {
     block.resize(parse_capacity(input.len(), output.len()), 0);
     let mut sink = SliceSink::new(block, 0);
-    let literal_start = parse_optimal_sequences(
+    let literal_start = parse_optimal_sequences_with_scratch(
         input,
         0,
         &mut sink,
@@ -154,6 +160,7 @@ fn optimal_dest_size(
         &[],
         0,
         output.len(),
+        optimal_states,
     );
     if let Some(literal_start) = literal_start {
         handle_last_literals(&mut sink, &input[literal_start..]);
@@ -175,6 +182,7 @@ fn optimal_dest_size(
 pub struct CompressHcDestSizeTable {
     hash_table: Option<HashTableHCU32>,
     block: Vec<u8>,
+    optimal_states: Vec<OptimalState>,
 }
 
 impl CompressHcDestSizeTable {
@@ -183,12 +191,13 @@ impl CompressHcDestSizeTable {
         Self::default()
     }
 
-    /// Heap bytes retained by the hash tables and parser scratch buffer.
+    /// Heap bytes retained by the hash table and parser scratch buffers.
     pub fn memory_usage_bytes(&self) -> usize {
         self.hash_table
             .as_ref()
             .map_or(0, HashTableHCU32::allocated_bytes)
             + self.block.capacity()
+            + self.optimal_states.capacity() * core::mem::size_of::<OptimalState>()
     }
 }
 
@@ -217,6 +226,7 @@ pub fn compress_hc_dest_size_with_table(
             params,
             table.hash_table.as_mut().unwrap(),
             &mut table.block,
+            &mut table.optimal_states,
         );
     }
     compress_hc_dest_size_without_optimal(input, output, level)
@@ -269,6 +279,8 @@ fn compress_hc_dest_size_without_optimal(
 
 #[cfg(test)]
 mod tests {
+    use super::super::optimal::parse_optimal_sequences;
+    use super::super::TRAILING_LITERALS;
     use super::*;
     use crate::block::decompress;
     use alloc::vec;
@@ -305,10 +317,26 @@ mod tests {
     }
 
     #[test]
+    fn reusable_workspace_retains_optimal_parser_states() {
+        let input = noise(64 * 1024);
+        let mut output = vec![0; 4096];
+        let mut table = CompressHcDestSizeTable::new();
+
+        compress_hc_dest_size_with_table(&input, &mut output, 12, &mut table);
+        let retained = table.memory_usage_bytes();
+        let parser_states =
+            (LZ4_OPT_NUM + TRAILING_LITERALS) * core::mem::size_of::<OptimalState>();
+        assert!(retained >= parser_states);
+
+        compress_hc_dest_size_with_table(&input, &mut output, 12, &mut table);
+        assert_eq!(table.memory_usage_bytes(), retained);
+    }
+
+    #[test]
     fn level_12_search_budget_scales_with_fixed_output_capacity() {
         for (capacity, attempts) in [
-            (4 * 1024, 96),
-            (8 * 1024, 96),
+            (4 * 1024, 48),
+            (8 * 1024, 48),
             (16 * 1024, 96),
             (32 * 1024, 192),
             (64 * 1024, 192),
@@ -319,9 +347,17 @@ mod tests {
     }
 
     #[test]
+    fn level_12_small_outputs_commit_on_medium_matches() {
+        assert_eq!(dest_size_params(12, 4 * 1024).sufficient_match_len, 128);
+        assert_eq!(dest_size_params(12, 8 * 1024).sufficient_match_len, 128);
+        assert_eq!(dest_size_params(12, 16 * 1024).sufficient_match_len, 512);
+    }
+
+    #[test]
     fn fixed_output_uses_less_optimal_search_than_full_compression() {
         assert!(hc_level_params(12).full_optimal_update);
         assert!(!dest_size_params(12, 4 * 1024).full_optimal_update);
+        assert!(!dest_size_params(12, 8 * 1024).full_optimal_update);
     }
 
     /// Input that makes one parser step write as much as it can: noise up to
