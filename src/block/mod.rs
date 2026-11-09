@@ -33,8 +33,8 @@ pub(crate) mod decompress;
 pub use compress::*;
 #[cfg(feature = "alloc")]
 pub use compress_hc::{
-    compress_hc_dest_size, compress_hc_into, compress_hc_to_vec, compress_hc_to_vec_with_table,
-    CompressTableHC,
+    compress_hc_dest_size, compress_hc_dest_size_with_table, compress_hc_into, compress_hc_to_vec,
+    compress_hc_to_vec_with_table, CompressHcDestSizeTable, CompressTableHC,
 };
 pub use decompress::*;
 

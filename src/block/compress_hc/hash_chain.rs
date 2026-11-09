@@ -25,6 +25,10 @@ pub(super) struct HashTableHCU32 {
     /// `pos & chain_mask()`. Dynamically sized (power of 2, up to
     /// `MAX_DISTANCE_HC`) based on input length, enabling efficient masking.
     chain_table: Box<[u16]>,
+    /// Start and length of the contiguous chain-table span written since reset.
+    /// Insertions advance through input positions in order, wrapping at the table mask.
+    chain_touched_start: usize,
+    chain_touched_len: usize,
     /// Next input position to be inserted into the hash/chain tables.
     /// Positions below this have already been indexed; the compressor
     /// lazily inserts up to the current search offset on demand.
@@ -364,6 +368,16 @@ fn count_buffer_match(
     MINMATCH + count_common_bytes(input, candidate + MINMATCH, cur + MINMATCH, match_limit)
 }
 
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+std::thread_local! {
+    /// Bytes `reverse_count_pattern` walked back over on this thread, so a
+    /// test can bound the search without timing it.
+    pub(super) static BYTES_SCANNED_BACK: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// Result of pattern/repeat chain optimization inside [`find_longer_hash_chain_match`]
 /// (mirrors LZ4HC repeat detection).
 enum PatternChainAction {
@@ -401,6 +415,11 @@ fn candidate_source(
 }
 
 impl HashTableHCU32 {
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.dictionary.len() * core::mem::size_of::<u32>()
+            + self.chain_table.len() * core::mem::size_of::<u16>()
+    }
+
     #[inline]
     pub(super) fn new(max_attempts: usize, input_len: usize) -> Self {
         // Dict table: fixed size, hash function already bounds to this range
@@ -416,6 +435,8 @@ impl HashTableHCU32 {
         Self {
             dictionary,
             chain_table: vec![0u16; chain_size].into_boxed_slice(),
+            chain_touched_start: 0,
+            chain_touched_len: 0,
             next_to_update: 0,
             max_attempts,
         }
@@ -429,15 +450,24 @@ impl HashTableHCU32 {
 
         self.dictionary.fill(0);
 
-        // Reuse chain table if big enough, otherwise reallocate
+        // Reuse chain table if big enough, clearing only positions written by
+        // the previous block. Its index sequence follows input positions and
+        // wraps at the chain mask.
         if self.chain_table.len() >= needed_chain_size {
-            self.chain_table[..needed_chain_size].fill(0);
+            self.clear_touched_chain();
         } else {
             self.chain_table = vec![0u16; needed_chain_size].into_boxed_slice();
+            self.chain_touched_len = 0;
         }
 
         self.next_to_update = 0;
         self.max_attempts = max_attempts;
+    }
+
+    /// The positions inserted so far, which is as far as the search has got.
+    #[cfg(test)]
+    pub(super) fn positions_inserted(&self) -> usize {
+        self.next_to_update
     }
 
     /// Prepare the table for a new linked block without clearing existing entries.
@@ -450,6 +480,10 @@ impl HashTableHCU32 {
             let old_len = self.chain_table.len();
             new_chain[..old_len].copy_from_slice(&self.chain_table);
             self.chain_table = new_chain;
+            // The mask changed, so the old and new writes no longer form one
+            // contiguous span in the new ring. Clear the whole table next reset.
+            self.chain_touched_start = 0;
+            self.chain_touched_len = MAX_DISTANCE_HC;
         }
         self.next_to_update = block_start;
         self.max_attempts = max_attempts;
@@ -464,6 +498,10 @@ impl HashTableHCU32 {
             *entry = entry.saturating_sub(delta32);
         }
         self.next_to_update = self.next_to_update.saturating_sub(delta);
+        // Repositioning changes subsequent ring indices without moving the
+        // stored chain entries. Treat the table as fully touched for reset.
+        self.chain_touched_start = 0;
+        self.chain_touched_len = self.chain_table.len();
     }
 
     /// Mask for chain table indexing (table size is always power of 2)
@@ -516,6 +554,22 @@ impl HashTableHCU32 {
         self.dictionary[hash] = pos as u32;
     }
 
+    fn clear_touched_chain(&mut self) {
+        let table_len = self.chain_table.len();
+        let touched_len = self.chain_touched_len.min(table_len);
+        if touched_len == table_len {
+            self.chain_table.fill(0);
+        } else if touched_len > 0 {
+            let first_len = touched_len.min(table_len - self.chain_touched_start);
+            self.chain_table[self.chain_touched_start..self.chain_touched_start + first_len]
+                .fill(0);
+            if first_len < touched_len {
+                self.chain_table[..touched_len - first_len].fill(0);
+            }
+        }
+        self.chain_touched_len = 0;
+    }
+
     /// Get dictionary slot at hash index (most recent absolute position).
     #[inline]
     fn get_dictionary_at(&self, hash: usize) -> usize {
@@ -527,9 +581,19 @@ impl HashTableHCU32 {
     #[inline]
     fn insert(&mut self, cur: u32, input: &[u8], stream_offset: usize) {
         let cur_absolute = cur as usize + stream_offset;
-        for absolute_position in self.next_to_update..cur_absolute {
-            let local_pos = absolute_position - stream_offset;
-            self.add_hash(get_hash_at(input, local_pos), absolute_position);
+        if cur_absolute > self.next_to_update {
+            let inserted = cur_absolute - self.next_to_update;
+            if self.chain_touched_len == 0 {
+                self.chain_touched_start = self.next_to_update & self.chain_mask();
+            }
+            for absolute_position in self.next_to_update..cur_absolute {
+                let local_pos = absolute_position - stream_offset;
+                self.add_hash(get_hash_at(input, local_pos), absolute_position);
+            }
+            self.chain_touched_len = self
+                .chain_touched_len
+                .saturating_add(inserted)
+                .min(self.chain_table.len());
         }
         self.next_to_update = cur_absolute;
     }
@@ -589,6 +653,8 @@ impl HashTableHCU32 {
         let forward_pattern_len =
             count_pattern(input, match_candidate_relative + 4, match_limit, pattern) + 4;
         let back_length = reverse_count_pattern(input, match_candidate_relative, 0, pattern);
+        #[cfg(test)]
+        BYTES_SCANNED_BACK.with(|scanned| scanned.set(scanned.get() + back_length));
         let segment_length = back_length + forward_pattern_len;
 
         if segment_length >= *source_pattern_length && forward_pattern_len <= *source_pattern_length
@@ -599,6 +665,7 @@ impl HashTableHCU32 {
             if cur_absolute > new_ref_abs && cur_absolute - new_ref_abs <= self.chain_mask() {
                 return PatternChainAction::RetryCandidate(new_ref_abs);
             }
+            PatternChainAction::StopSearch
         } else {
             let new_candidate_relative = match_candidate_relative - back_length;
             let new_ref_abs = new_candidate_relative + stream_offset;
@@ -614,9 +681,8 @@ impl HashTableHCU32 {
                 }
                 return PatternChainAction::RetryCandidate(new_ref_abs - dist);
             }
+            PatternChainAction::StopSearch
         }
-
-        PatternChainAction::NoAction
     }
 }
 
@@ -1210,5 +1276,28 @@ mod review_tests {
         m.trim_front(5);
         assert_eq!(m.offset(), 13);
         assert_eq!(m.start_position, 15);
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::HashTableHCU32;
+
+    #[test]
+    fn reset_clears_only_the_written_chain_span_across_wrap() {
+        let mut table = HashTableHCU32::new(1, 256);
+        let input = alloc::vec![0u8; 20];
+        table.next_to_update = 250;
+        table.insert(10, &input, 250);
+        assert_eq!(table.chain_touched_start, 250);
+        assert_eq!(table.chain_touched_len, 10);
+
+        table.chain_table.fill(u16::MAX);
+        table.reset(1, 256);
+
+        for (index, value) in table.chain_table.iter().enumerate() {
+            let was_touched = index >= 250 || index < 4;
+            assert_eq!(*value, if was_touched { 0 } else { u16::MAX });
+        }
     }
 }

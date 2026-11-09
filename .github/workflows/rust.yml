@@ -76,8 +76,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - name: Fetch main as the pull request baseline
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - name: Check semver
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          rust-toolchain: ${{ env.rust_stable }}
           release-type: minor
+          # A fork's main may intentionally diverge from crates.io. PRs must
+          # not introduce additional API breaks; main pushes still check the
+          # published baseline before a release.
+          baseline-rev: ${{ github.event_name == 'pull_request' && 'origin/main' || '' }}

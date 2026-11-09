@@ -5,6 +5,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn level_12_search_parameters_match_benchmarked_baseline() {
+    let params = hc_level_params(12);
+
+    assert_eq!(params.strategy, HcCompressionStrategy::Optimal);
+    assert_eq!(params.max_attempts, 4096);
+    assert_eq!(params.sufficient_match_len, 512);
+}
+
+#[test]
 fn test_compress_hc_basic() {
     let input = b"Hello, this is a test string that should be compressed!";
     let mut output = vec![0u8; input.len() * 2]; // Ensure enough space
@@ -304,4 +313,45 @@ fn test_compress_hc_level_clamping() {
     let size_level_20 = result.unwrap();
     let decompressed = decompress(&output[..size_level_20], input.len()).unwrap();
     assert_eq!(&input[..], &decompressed[..]);
+}
+
+/// Pseudo-random bytes, which do not compress and make no matches.
+fn incompressible(length: usize, mut state: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(length);
+    for _ in 0..length {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.push(state as u8);
+    }
+    bytes
+}
+
+/// A run of zeros longer than the 64 KiB match distance, followed by table
+/// entries with short stretches of zeros in them, as ELF sections are. At each
+/// of those zeros the hash chain leads back into the run, where the repeat
+/// shortcut lands on a candidate too far back to use, and the search must stop
+/// there. Carrying on scanned the run backwards on each of `max_attempts`
+/// attempts at every such position: one 4 MiB stretch of an Android library
+/// took four minutes to compress.
+#[test]
+fn a_long_run_before_short_runs_does_not_exhaust_the_search() {
+    const ENTRY: [u8; 24] = [
+        0x5e, 0x3c, 0x03, 0, 0, 0, 0, 0, 0x5c, 0, 0, 0, 0, 0, 0, 0, 0x12, 0x03, 0, 0, 0x20, 0, 0, 0,
+    ];
+    let mut input = incompressible(4096, 1);
+    input.extend(core::iter::repeat(0u8).take(100_000));
+    for _ in 0..8 {
+        input.extend_from_slice(&ENTRY);
+    }
+
+    hash_chain::BYTES_SCANNED_BACK.with(|scanned| scanned.set(0));
+    let compressed = compress_hc_to_vec(&input, 12);
+    let scanned = hash_chain::BYTES_SCANNED_BACK.with(|scanned| scanned.get());
+
+    assert_eq!(decompress(&compressed, input.len()).unwrap(), input);
+    assert!(
+        scanned < 10_000_000,
+        "the search scanned {scanned} bytes back"
+    );
 }

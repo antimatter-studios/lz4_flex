@@ -68,6 +68,11 @@ harness = false
 name = "binggan_bench"
 path = "benches/binggan_bench.rs"
 
+[[bench]]
+harness = false
+name = "fixed_output_dest_size"
+path = "benches/fixed_output_dest_size.rs"
+
 # [[bench]]
 # harness = false
 # name = "quickbench"
