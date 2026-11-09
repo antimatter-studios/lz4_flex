@@ -3,7 +3,7 @@ use crate::block::{
     MINMATCH,
 };
 use crate::sink::Sink;
-use alloc::vec;
+use alloc::vec::Vec;
 
 use super::hash_chain::{find_longer_hash_chain_match, HashTableHCU32};
 use super::{HcCompressionStrategy, HcLevelParams, LZ4_OPT_NUM, RUN_MASK, TRAILING_LITERALS};
@@ -15,7 +15,7 @@ use super::{HcCompressionStrategy, HcLevelParams, LZ4_OPT_NUM, RUN_MASK, TRAILIN
 /// The 4099-entry optimal-parsing buffer is ~64KB.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-struct OptimalState {
+pub(super) struct OptimalState {
     /// Best known encoded size (byte-cost model) to reach this position.
     path_cost: i32,
     /// Length of the literal run immediately before this state (optimal-parse bookkeeping).
@@ -353,6 +353,34 @@ pub(super) fn parse_optimal_sequences(
     stream_offset: usize,
     output_limit: usize,
 ) -> Option<usize> {
+    let mut optimal_states = Vec::new();
+    parse_optimal_sequences_with_scratch(
+        input,
+        input_pos,
+        output,
+        level_params,
+        hash_table,
+        ext_dict,
+        stream_offset,
+        output_limit,
+        &mut optimal_states,
+    )
+}
+
+/// Parse using caller-owned optimal states, retaining the allocation between
+/// independent fixed-output blocks.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn parse_optimal_sequences_with_scratch(
+    input: &[u8],
+    input_pos: usize,
+    output: &mut impl Sink,
+    level_params: HcLevelParams,
+    hash_table: &mut HashTableHCU32,
+    ext_dict: &[u8],
+    stream_offset: usize,
+    output_limit: usize,
+    mut optimal_states: &mut Vec<OptimalState>,
+) -> Option<usize> {
     if input.len() - input_pos < LZ4_MIN_LENGTH {
         return Some(input_pos);
     }
@@ -376,7 +404,13 @@ pub(super) fn parse_optimal_sequences(
 
     let mut literal_start = input_pos;
     let mut cur = input_pos;
-    let mut optimal_states = vec![OptimalState::SENTINEL; LZ4_OPT_NUM + TRAILING_LITERALS];
+    let state_count = LZ4_OPT_NUM + TRAILING_LITERALS;
+    if optimal_states.is_empty() {
+        optimal_states.resize(state_count, OptimalState::SENTINEL);
+    } else {
+        optimal_states.resize(state_count, OptimalState::SENTINEL);
+        optimal_states.fill(OptimalState::SENTINEL);
+    }
     let sufficient_match_len = sufficient_match_len.min(LZ4_OPT_NUM - 1);
 
     while cur <= end_pos_check {
