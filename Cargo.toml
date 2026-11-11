@@ -1,16 +1,22 @@
 [package]
 authors = ["Pascal Seitz <pascal.seitz@gmail.com>", "Arthur Silva <arthurprs@gmail.com>", "ticki <Ticki@users.noreply.github.com>"]
-description = "Fastest LZ4 implementation in Rust, no unsafe by default."
+description = "A fork of lz4_flex carrying LZ4HC with a fixed-output mode (PSeitz/lz4_flex#244), published until upstream releases it."
 edition = "2021"
 keywords = ["compression", "lz4", "compress", "decompression", "decompress"]
-name = "lz4_flex"
-homepage = "https://github.com/pseitz/lz4_flex"
-repository = "https://github.com/pseitz/lz4_flex"
-readme = "README.md"
+name = "am-lz4-flex"
+homepage = "https://github.com/antimatter-studios/lz4_flex"
+repository = "https://github.com/antimatter-studios/lz4_flex"
+readme = "README-am-lz4-flex.md"
 license = "MIT"
 version = "0.14.0"
-include = ["src/*.rs", "src/frame/**/*", "src/block/**/*", "README.md", "LICENSE"]
+include = ["src/*.rs", "src/frame/**/*", "src/block/**/*", "README-am-lz4-flex.md", "LICENSE"]
 rust-version = "1.81"
+
+# The library keeps lz4_flex's name, so code, tests and doctests written
+# against lz4_flex build unchanged. A crate that depends on both renames this
+# one, as `lz4_flex_hc = { package = "am-lz4-flex", ... }`.
+[lib]
+name = "lz4_flex"
 
 [package.metadata.docs.rs]
 all-features = true
